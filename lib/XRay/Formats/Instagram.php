@@ -1,10 +1,18 @@
 <?php
 namespace p3k\XRay\Formats;
 
+const BASE_URL = 'https://www.instagram.com/';
+const QUERY_MEDIA = BASE_URL.'graphql/query/?query_hash=42323d64886122307be10013ad2dcc44&variables=%s';
+const QUERY_MEDIA_VARS = '{"id":"%s","first":%d,"after":"%s"}';
+
 use DOMDocument, DOMXPath;
 use DateTime, DateTimeZone;
 
 class Instagram extends Format {
+
+  private static $gis;
+
+  private static $extra_photos = 20;
 
   public static function matches_host($url) {
     $host = parse_url($url, PHP_URL_HOST);
@@ -16,6 +24,9 @@ class Instagram extends Format {
   }
 
   public static function parse($http, $html, $url, $opts=[]) {
+    if(isset($opts['length'])) {
+      self::$extra_photos = intval($opts['length'])-12;
+    }
     if(preg_match('#instagram.com/([^/]+)/$#', $url)) {
       if(isset($opts['expect']) && $opts['expect'] == 'feed')
         return self::parseFeed($http, $html, $url);
@@ -39,6 +50,34 @@ class Instagram extends Format {
     ];
   }
 
+  private static function _getIntstagramGIS($params) {
+    $data = self::$gis.":".$params;
+    return md5($data);
+  }
+
+  private static function _getMorePhotos($http,$html,$url,$profileData) {
+    $params = sprintf(
+      QUERY_MEDIA_VARS,
+      $profileData['id'],
+      self::$extra_photos,
+      $profileData['edge_owner_to_timeline_media']['page_info']['end_cursor']
+    );
+
+    $url = sprintf(QUERY_MEDIA,$params);
+    $headers = [];
+    $headers[] = 'x-instagram-gis: ' . self::_getIntstagramGIS($params);
+    $headers[] = 'x-requested-with: XMLHttpRequest';
+
+    $resp = $http->get($url,$headers);
+
+    if(!$resp['error']) {
+      $data = json_decode($resp['body'],true);
+      $photos = $data['data']['user']['edge_owner_to_timeline_media']['edges'];
+      return $photos;
+    }
+    return null;
+  }
+
   private static function parseFeed($http, $html, $url) {
     $profileData = self::_parseProfileFromHTML($html);
     if(!$profileData)
@@ -47,9 +86,13 @@ class Instagram extends Format {
     $photos = $profileData['edge_owner_to_timeline_media']['edges'];
     $items = [];
 
+    $morePhotos = self::_getMorePhotos($http,$html,$url,$profileData);
+
+    $photos = array_merge($photos,$morePhotos);
+
     foreach($photos as $photoData) {
       $item = self::parsePhotoFromData($http, $photoData['node'],
-        'https://www.instagram.com/p/'.$photoData['node']['shortcode'].'/', $profileData);
+        BASE_URL.'p/'.$photoData['node']['shortcode'].'/', $profileData);
       // Note: Not all the photo info is available in the initial JSON.
       // Things like video mp4 URLs and person tags and locations are missing.
       // Consumers of the feed will need to fetch the photo permalink in order to get all missing information.
@@ -249,7 +292,7 @@ class Instagram extends Format {
     if(isset($profile['external_url']) && $profile['external_url'])
       $author['url'] = $profile['external_url'];
     else
-      $author['url'] = 'https://www.instagram.com/' . $profile['username'];
+      $author['url'] = BASE_URL . $profile['username'];
 
     if(isset($profile['profile_pic_url_hd']))
       $author['photo'] = $profile['profile_pic_url_hd'];
@@ -263,7 +306,7 @@ class Instagram extends Format {
   }
 
   private static function _getInstagramProfile($username, $http) {
-    $response = $http->get('https://www.instagram.com/'.$username.'/');
+    $response = $http->get(BASE_URL.$username.'/');
 
     if(!$response['error'])
       return self::_parseProfileFromHTML($response['body']);
@@ -273,6 +316,9 @@ class Instagram extends Format {
 
   private static function _parseProfileFromHTML($html) {
     $data = self::_extractIGData($html);
+    if(isset($data['rhx_gis'])) {
+      self::$gis = $data['rhx_gis'];
+    }
     if(isset($data['entry_data']['ProfilePage'][0])) {
       $profile = $data['entry_data']['ProfilePage'][0];
       if($profile && isset($profile['graphql']['user'])) {
@@ -284,7 +330,7 @@ class Instagram extends Format {
   }
 
   private static function _getInstagramLocation($id, $http) {
-    $igURL = 'https://www.instagram.com/explore/locations/'.$id.'/';
+    $igURL = BASE_URL.'explore/locations/'.$id.'/';
     $response = $http->get($igURL);
     if($response['body']) {
       $data = self::_extractVenueDataFromVenuePage($response['body']);
